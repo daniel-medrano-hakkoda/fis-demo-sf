@@ -10,6 +10,8 @@ SET project_name = 'EDW'; -- Name of the project, and also the name of the metad
 SET metadata_schema_name = 'ETL'; -- Name of the metadata database schema.  Change this if you'd like the metadata schema named differently. Note: If this changes, the Azure Data Factory pipeline reference must be changed as well.
 SET metadata_config = 'INGESTION_METADATA_CONFIG'; -- Name of the metadata configuration table.  Change this if you'd like the metadata config table named differently.  Note: If this changes, the Azure Data Factory pipeline reference must be changed as well.
 
+SET metadata_config_view = 'FIS_INGESTION_METADATA_CONFIG';
+
 /* 4. Create variables used for creating all objects. */
 SET role_name = $project_name || '_ROLE'; -- Role for the service account
 SET user_name = 'AZUREADMIN'; -- User for the service account.  Store this value in Azure KeyVault.
@@ -17,6 +19,8 @@ SET user_password = 'ViMo2304'; -- Password for the service account.  Store this
 SET warehouse_name = $project_name || '_WH'; -- Name of the warehouse that is used to load data
 SET metadata_database_name = $project_name || $environment_; -- Name of the Metadata database used for loading data
 SET metadata_config_name = $metadata_database_name || '.' || $metadata_schema_name || '.' || $metadata_config; -- Full string of the Metadata configuration table
+SET metadata_config_view_name = $metadata_database_name || '.' || $metadata_schema_name || '.' || $metadata_config_view; -- Full string of the Metadata configuration view
+
 SET trigger_log = $metadata_database_name || '.' || $metadata_schema_name || '.TRIGGER_LOG'; -- Full string of the metadata trigger log
 SET stage_database_name = 'STAGE' || $environment_; -- Name of the Staging Database.  Change this if you'd like the Staging database named differently.
 SET datalake_database_static_name = 'DATALAKE'; -- Name of the Target Database used for creating the storage integration.  Change this if you'd like the Target database named differently.
@@ -58,12 +62,13 @@ AUTO_SUSPEND = 10
 AUTO_RESUME = true
 INITIALLY_SUSPENDED = true
 COMMENT = 'Dedicated Warehouse for ELT executions & operations to ingest data. Recommended WAREHOUSE_SIZE is Extra Small with a high MAX_CLUSTER_COUNT for running pipelines/triggers concurrently.';
+
 use role ACCOUNTADMIN;
 
 CREATE OR REPLACE ROLE identifier($role_name)
 COMMENT = 'Role used by the ELT process.';
-GRANT ROLE identifier($role_name) to role SYSADMIN;
 
+GRANT ROLE identifier($role_name) to role SYSADMIN;
 
 CREATE USER IF NOT EXISTS identifier($user_name)
 PASSWORD = $user_password
@@ -83,34 +88,35 @@ CREATE DATABASE IF NOT EXISTS identifier($metadata_database_name)
 COMMENT = 'Snowflake Database to host Sources loaded from Azure Data Factory to ingest data into Snowflake using a variety of incremental loading techniques. The database also contains a schema for all metadata to operate and host logging of pipeline/trigger executions.';
 
 USE DATABASE identifier($metadata_database_name);
+
 CREATE SCHEMA IF NOT EXISTS identifier($metadata_schema_name)
    COMMENT = 'Schema for metadata and logging of pipeline/trigger executions.';
 
 USE SCHEMA identifier($metadata_schema_name);
-CREATE OR REPLACE TABLE  INGESTION_METADATA_CONFIG
--- identifier($metadata_config_name)
-(
-METADATA_CONFIG_KEY STRING
-,LOGICAL_NAME STRING
-,SOURCE_TYPE STRING
-,DATABASE_NAME STRING
-,SCHEMA_NAME STRING
-,SOURCE_TABLE_NAME STRING
-,DELTA_COLUMN STRING
-,DELTA_VALUE STRING
-,CHANGE_TRACKING STRING
-,CHANGE_TRACKING_TYPE STRING
-,ENABLED STRING
-,PRIORITY_FLAG STRING
-,PAYLOAD STRING
-,BLOB_LAST_LOAD_DT STRING
-,STAGE_LAST_LOAD_DT	STRING
-,TARGET_LAST_LOAD_DT STRING
-,ROW_COUNT STRING
+
+CREATE OR REPLACE TABLE identifier($metadata_config_name) (
+    METADATA_CONFIG_KEY STRING,
+    LOGICAL_NAME STRING,
+    SOURCE_TYPE STRING,
+    DATABASE_NAME STRING,
+    SCHEMA_NAME STRING,
+    SOURCE_TABLE_NAME STRING,
+    DELTA_COLUMN STRING,
+    DELTA_VALUE STRING,
+    CHANGE_TRACKING STRING,
+    CHANGE_TRACKING_TYPE STRING,
+    ENABLED STRING,
+    PRIORITY_FLAG STRING,
+    PAYLOAD STRING,
+    BLOB_LAST_LOAD_DT STRING,
+    STAGE_LAST_LOAD_DT	STRING,
+    TARGET_LAST_LOAD_DT STRING,
+    ROW_COUNT STRING,
+    CUSTOM_PARAMS VARIANT
 )
 COMMENT = 'Snowflake table for storing all metadata needed to populate parameters in the Azure Data Factory pipeline and dynamically load data from source to Snowflake for a given table or file.';
 
-create or replace view EDW_DEV.ETL.CLARITY_DAILY_CONFIG(
+CREATE OR REPLACE VIEW FIS_INGESTION_METADATA_CONFIG (
 	METADATA_CONFIG_KEY,
 	LOGICAL_NAME,
 	SOURCE_TYPE,
@@ -129,14 +135,11 @@ create or replace view EDW_DEV.ETL.CLARITY_DAILY_CONFIG(
 	TARGET_LAST_LOAD_DT,
 	ROW_COUNT,
     CUSTOM_PARAMS
-) as
+) AS
 SELECT * FROM EDW_DEV.ETL.INGESTION_METADATA_CONFIG
-WHERE 1=1
-AND LOGICAL_NAME = 'Clarity';
+WHERE LOGICAL_NAME = 'FIS';
 
-
-CREATE TABLE IF NOT EXISTS identifier($trigger_log)
-(
+CREATE TABLE IF NOT EXISTS identifier($trigger_log) (
 	DATA_FACTORY_NAME VARCHAR(16777216),
 	PIPELINE_NAME VARCHAR(16777216),
 	RUN_ID VARCHAR(16777216),
@@ -237,35 +240,46 @@ GRANT USAGE ON DATABASE identifier($metadata_database_name) TO ROLE identifier($
 GRANT USAGE ON SCHEMA identifier($metadata_schema_name) TO ROLE identifier($role_name);
 GRANT ALL ON ALL TABLES IN SCHEMA identifier($metadata_schema_name) TO ROLE identifier($role_name);
 GRANT ALL ON ALL VIEWS IN SCHEMA identifier($metadata_schema_name) TO ROLE identifier($role_name);
+
 USE ROLE sysadmin;
+
 GRANT USAGE ON PROCEDURE INSERT_INTO_METADATA_CONFIG (STRING, STRING, STRING, STRING, STRING, STRING, STRING, STRING, STRING, STRING, STRING, STRING, STRING, STRING, STRING) TO ROLE identifier($role_name);
 
-SHOW PROCEDURES;
 /* 7. Create the Stage database.*/
 
 CREATE DATABASE IF NOT EXISTS identifier($stage_database_name)
 COMMENT = 'Snowflake database for staging data coming from ADLS.  The data stored in the stage database can be either transient or persistent.';
+
 GRANT USAGE ON DATABASE identifier($stage_database_name) TO ROLE identifier($role_name);
+
 /* 8. Create the Target database.*/
+
 CREATE DATABASE IF NOT EXISTS identifier($datalake_database_name)
 COMMENT = 'Snowflake database that consumes data from staging and is the target for replicated data from the source.';
+
 GRANT USAGE ON DATABASE identifier($datalake_database_name) TO ROLE identifier($role_name);
+
 /* 9. Customize this portion of the script for whatever stage and target schemas you want to load data into.*/
+
 USE DATABASE identifier($stage_database_name);
+
 CREATE SCHEMA IF NOT EXISTS identifier($clarity_dbo_schema_name);
 CREATE SCHEMA IF NOT EXISTS identifier($clarity_epic_schema_name);
 CREATE SCHEMA IF NOT EXISTS identifier($caboodle_dbo_schema_name);
 CREATE SCHEMA IF NOT EXISTS identifier($caboodle_epic_schema_name);
+
 GRANT USAGE ON SCHEMA identifier($clarity_dbo_schema_name) TO ROLE identifier($role_name);
 GRANT USAGE ON SCHEMA identifier($clarity_epic_schema_name) TO ROLE identifier($role_name);
 GRANT USAGE ON SCHEMA identifier($caboodle_dbo_schema_name) TO ROLE identifier($role_name);
 GRANT USAGE ON SCHEMA identifier($caboodle_epic_schema_name) TO ROLE identifier($role_name);
 
 USE DATABASE identifier($datalake_database_name);
+
 CREATE SCHEMA IF NOT EXISTS identifier($clarity_dbo_schema_name);
 CREATE SCHEMA IF NOT EXISTS identifier($clarity_epic_schema_name);
 CREATE SCHEMA IF NOT EXISTS identifier($caboodle_dbo_schema_name);
 CREATE SCHEMA IF NOT EXISTS identifier($caboodle_epic_schema_name);
+
 GRANT USAGE ON SCHEMA identifier($clarity_dbo_schema_name) TO ROLE identifier($role_name);
 GRANT USAGE ON SCHEMA identifier($clarity_epic_schema_name) TO ROLE identifier($role_name);
 GRANT USAGE ON SCHEMA identifier($caboodle_dbo_schema_name) TO ROLE identifier($role_name);
@@ -276,16 +290,15 @@ GRANT USAGE ON SCHEMA identifier($caboodle_epic_schema_name) TO ROLE identifier(
 CREATE DATABASE UTIL_DB;
 
 GRANT USAGE ON DATABASE UTIL_DB TO ROLE identifier($role_name);
+
 CREATE FILE FORMAT UTIL_DB.PUBLIC.PARQUET
 TYPE = 'PARQUET'
 COMPRESSION = 'AUTO';
+
 GRANT ALL PRIVILEGES ON ALL FILE FORMATS IN DATABASE UTIL_DB TO ROLE identifier($role_name);
-
-
 
 /* 11. Create Notification Integration - This allows us to view the Azure Storage Queue to trigger Snowpipe executions.*/
 USE ROLE accountadmin;
-
 
 CREATE OR REPLACE NOTIFICATION INTEGRATION identifier($notification_integration_name)
 ENABLED = TRUE
@@ -299,6 +312,7 @@ DESCRIBE INTEGRATION identifier($notification_integration_name);
 /* Once this is done, use DESCRIBE INTEGRATION {Notification Integration Name} to get the AZURE_CONSENT_URL value.  Paste this in a new tab and authenticate the Snowflake Service Principal.  Once authenticated and it appears in IAM for the storage queue, grant it the 'Storage Queue Data Contributor' role. If you can't find the Service Principal name, it can be found by running DESCRIBE INTEGRATION {Notification Integration Name} and finding the value for AZURE_MULTI_TENANT_APP_NAME.*/
 
 GRANT USAGE ON INTEGRATION identifier($notification_integration_name) TO ROLE identifier($role_name);
+
 /* 12. Create Storage Integration - This allows us to access Azure Storage and stage data for loading.*/
 
 CREATE STORAGE INTEGRATION IF NOT EXISTS identifier($storage_integration_name)
@@ -309,10 +323,15 @@ AZURE_TENANT_ID = $azure_tenant_id
 STORAGE_ALLOWED_LOCATIONS = ('*');
 
 DESCRIBE INTEGRATION identifier($storage_integration_name);
+
 /* Once this is done, use DESCRIBE INTEGRATION {Storage Integration Name} to get the AZURE_CONSENT_URL value.  Paste this in a new tab and authenticate the Snowflake Service Principal.  Once authenticated and it appears in IAM for the storage account, grant it the 'Storage Blob Data Reader' and 'Storage Blob Data Contributor' roles. If you can't find the Service Principal name, it can be found by running DESCRIBE INTEGRATION {Storage Integration Name} and finding the value for AZURE_MULTI_TENANT_APP_NAME.*/
+
 GRANT USAGE ON INTEGRATION identifier($storage_integration_name) TO ROLE identifier($role_name);
+
 /* 13. Grant permissions and create the external stage.*/
-use role sysadmin;
+
+USE ROLE sysadmin;
+
 GRANT CREATE STAGE ON SCHEMA UTIL_DB.PUBLIC TO ROLE identifier($role_name);
 
 CREATE OR REPLACE STAGE identifier($external_stage_name)
